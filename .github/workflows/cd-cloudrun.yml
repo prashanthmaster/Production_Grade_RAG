@@ -1,0 +1,82 @@
+name: CD (Cloud Run)
+
+# Deploys to GCP Cloud Run on every push to main, using Workload Identity
+# Federation — no static GCP key is ever stored in GitHub. See
+# cloudrun/05_github_wif.sh for how the trust relationship was set up.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write   # required to mint the OIDC token WIF exchanges for a GCP token
+
+env:
+  REGION: ${{ secrets.GCP_REGION }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REPO: enterprise-rag
+  IMAGE_NAME: enterprise-rag
+  API_SERVICE: rag-api
+  UI_SERVICE: rag-ui
+
+jobs:
+  build-and-deploy:
+    name: Build, Push, and Deploy to Cloud Run
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}"
+          docker build -f Dockerfile.cloudrun \
+            -t "${IMAGE}:${{ github.sha }}" \
+            -t "${IMAGE}:latest" .
+
+      - name: Push image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}"
+          docker push "${IMAGE}:${{ github.sha }}"
+          docker push "${IMAGE}:latest"
+
+      # Both services already carry their full config (env vars, secrets,
+      # sizing) from the original `gcloud run deploy` runs in
+      # cloudrun/03_deploy_api.sh / 04_deploy_ui.sh. A redeploy here only
+      # needs to point each service at the new image — gcloud preserves
+      # everything else on the existing revision.
+      - name: Deploy rag-api
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}"
+          gcloud run deploy "${API_SERVICE}" \
+            --image="${IMAGE}:${{ github.sha }}" \
+            --region="${REGION}" \
+            --quiet
+
+      - name: Deploy rag-ui
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${IMAGE_NAME}"
+          gcloud run deploy "${UI_SERVICE}" \
+            --image="${IMAGE}:${{ github.sha }}" \
+            --region="${REGION}" \
+            --quiet
+
+      - name: Smoke test
+        run: |
+          API_URL="$(gcloud run services describe "${API_SERVICE}" --region="${REGION}" --format='value(status.url)')"
+          echo "API: ${API_URL}"
+          curl -fsS "${API_URL}/health" && echo
