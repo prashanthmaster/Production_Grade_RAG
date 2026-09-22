@@ -1,0 +1,125 @@
+# ==============================================================================
+# CD — Google Cloud Run
+#
+# Runs after CI passes on main. Authenticates via Workload Identity Federation
+# (no stored JSON key), builds with Cloud Build, deploys both services.
+#
+# Prerequisite: run ./cloudrun/05_github_wif.sh once, then add the four repo
+# secrets it prints.
+# ==============================================================================
+name: CD (Cloud Run)
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REPO: enterprise-rag
+  IMAGE_NAME: enterprise-rag
+  API_SERVICE: rag-api
+  UI_SERVICE: rag-ui
+
+jobs:
+  deploy:
+    # Never deploy on top of a red build.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write   # required for WIF — without it, auth silently fails
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Resolve image path
+        id: img
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${REPO}/${IMAGE_NAME}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        run: |
+          gcloud builds submit \
+            --config=cloudbuild.yaml \
+            --substitutions="_IMAGE=${{ steps.img.outputs.image }},SHORT_SHA=${{ steps.img.outputs.sha }}" \
+            .
+
+      - name: Deploy API
+        run: |
+          gcloud run deploy "${API_SERVICE}" \
+            --image="${{ steps.img.outputs.image }}:${{ steps.img.outputs.sha }}" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --service-account="rag-runtime@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com" \
+            --allow-unauthenticated \
+            --memory=2Gi --cpu=2 --cpu-boost \
+            --min-instances=0 --max-instances=5 \
+            --concurrency=8 --timeout=300 \
+            --set-env-vars="SERVICE_ROLE=api,QDRANT_COLLECTION=enterprise_rag,RATE_LIMIT_PER_MINUTE=60,STRICT_STARTUP=false,PYTHONUNBUFFERED=1,LOGFIRE_IGNORE_NO_CONFIG=1,LANGSMITH_PROJECT=enterprise_rag,LANGSMITH_TRACING=true,PORTKEY_PRIMARY_SLUG=marathon-api,PORTKEY_FALLBACK_SLUG=anthropic-fallback" \
+            --set-secrets="OPENAI_API_KEY=openai-api-key:latest,PORTKEY_API_KEY=portkey-api-key:latest,PORTKEY_PRIMARY_CONFIG_ID=portkey-primary-config-id:latest,JINA_API_KEY=jina-api-key:latest,QDRANT_URL=qdrant-url:latest,QDRANT_API_KEY=qdrant-api-key:latest,NEON_DB_URL=neon-db-url:latest,UPSTASH_REDIS_REST_URL=upstash-redis-rest-url:latest,UPSTASH_REDIS_REST_TOKEN=upstash-redis-rest-token:latest,RAG_API_KEY=rag-api-key:latest,LANGSMITH_API_KEY=langsmith-api-key:latest"
+
+      - name: Resolve API URL
+        id: apiurl
+        run: |
+          URL=$(gcloud run services describe "${API_SERVICE}" \
+                 --region="${{ secrets.GCP_REGION }}" --format='value(status.url)')
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy UI
+        run: |
+          gcloud run deploy "${UI_SERVICE}" \
+            --image="${{ steps.img.outputs.image }}:${{ steps.img.outputs.sha }}" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --service-account="rag-runtime@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com" \
+            --allow-unauthenticated \
+            --memory=1Gi --cpu=1 \
+            --min-instances=0 --max-instances=2 \
+            --concurrency=20 --timeout=300 \
+            --set-env-vars="SERVICE_ROLE=ui,BACKEND_URL=${{ steps.apiurl.outputs.url }},PYTHONUNBUFFERED=1,LOGFIRE_IGNORE_NO_CONFIG=1" \
+            --set-secrets="RAG_API_KEY=rag-api-key:latest"
+
+      - name: Smoke test
+        run: |
+          set -e
+          URL="${{ steps.apiurl.outputs.url }}"
+          echo "Checking ${URL}/health"
+          for i in 1 2 3 4 5; do
+            if curl -fsS --max-time 90 "${URL}/health"; then
+              echo "  liveness OK"; exit 0
+            fi
+            echo "  attempt $i failed (cold start?), retrying in 15s"; sleep 15
+          done
+          echo "Health check never succeeded — inspect the revision logs."
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Cloud Run deployment"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Image tag | \`${{ steps.img.outputs.sha }}\` |"
+            echo "| API | ${{ steps.apiurl.outputs.url }} |"
+            echo "| Region | ${{ secrets.GCP_REGION }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

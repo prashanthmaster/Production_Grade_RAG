@@ -1,0 +1,77 @@
+# ==============================================================================
+# CLOUD RUN PRODUCTION REQUIREMENTS
+#
+# Derived from requirements-prod.txt with three deliberate removals. Each is
+# justified by a grep of the source tree, not by guesswork:
+#
+#   torch + sentence-transformers  (~1.9 GB)
+#       Only reachable via app/services/retrieval/embedding.py::_load_fallback(),
+#       which is a lazy import behind a failed-Jina-probe branch. On Cloud Run we
+#       want that branch to fail loudly rather than silently load 2 GB into a
+#       container that must cold-start in seconds. Jina is the contract.
+#
+#   langchain-google-vertexai      (~120 MB)
+#       Zero references in app/ or ui/. Dead weight.
+#
+#   langchain-nvidia-ai-endpoints  (~40 MB)
+#       Zero references in app/ or ui/. Dead weight.
+#
+# Result: image drops from roughly 2 GB to roughly 400 MB, which is the single
+# largest lever on Cloud Run cold-start latency.
+#
+# streamlit is KEPT: the UI runs from this same image with a different command.
+# ==============================================================================
+
+# --- CORE API ---
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+python-dotenv==1.2.2
+requests==2.33.1
+numpy==2.4.4
+pytz==2026.2
+
+# --- VECTOR DB & RETRIEVAL ---
+qdrant-client==1.17.1
+redis==7.4.0
+
+# --- PRODUCTION PERSISTENCE ---
+tenacity==9.1.2
+langgraph-checkpoint-postgres==2.0.16
+psycopg==3.3.0
+psycopg-pool==3.3.0
+psycopg-binary==3.3.0
+slowapi==0.1.9
+
+# --- LANGCHAIN & AGENTIC ORCHESTRATION ---
+langchain==1.2.18
+langgraph==1.1.10
+langchain-community==0.4.1
+langchain-openai==1.2.1
+pydantic==2.13.4
+pydantic-settings==2.14.2
+
+# --- GUARDRAILS ---
+# fastembed is pinned explicitly because app/guardrails/colang_rules.py now names
+# FastEmbed as the embeddings engine. Previously it was an implicit transitive
+# default, which meant the model identity could shift under a NeMo upgrade.
+fastembed==0.5.1
+
+# --- LLM GATEWAY ---
+portkey-ai==2.3.0
+
+# --- OBSERVABILITY ---
+langsmith==0.8.3
+logfire[fastapi,requests]==4.32.1
+loguru==0.7.3
+prometheus-client==0.25.0
+prometheus-fastapi-instrumentator==8.0.2
+
+# --- UI (same image, different entrypoint role) ---
+streamlit==1.58.0
+
+# --- INGESTION PARSERS ---
+python-pptx==1.0.2
+python-docx==1.2.0
+pypdf==6.11.0
+beautifulsoup4==4.14.3
+nemoguardrails==0.17.0

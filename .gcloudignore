@@ -1,0 +1,68 @@
+# ==============================================================================
+# Controls what gets uploaded to Cloud Build as the source tarball.
+#
+# CHANGED from the original: ui/ is no longer excluded. The Cloud Run image runs
+# BOTH services from one artifact (Dockerfile.cloudrun does `COPY ui/ ./ui/`),
+# so excluding ui/ here made the build fail with "COPY failed: no source files".
+# That was a latent bug from when the UI was local-only.
+# ==============================================================================
+.gcloudignore
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Virtual environments (huge — never needed)
+venv/
+.venv/
+env/
+genv/
+enterprise_env/
+tenvv/
+
+# Secrets — these reach the container via Secret Manager, never the tarball
+.env
+.env.*
+!.env.example
+commands.md
+
+# Git & IDE
+.git/
+.gitignore
+.dockerignore
+.vscode/
+.idea/
+
+# Observability local state
+.logfire/
+.claude/
+
+# Data — ingestion runs from your machine against Qdrant Cloud directly.
+# ~120 MB of PDFs has no business in a build context.
+DATA/
+processed_data/
+
+# Eval suite — local only, and pulls ragas/deepeval which are not in the image
+evals/
+tests/
+
+# Notebooks & docs
+notebooks/
+DOCS/
+*.md
+!README.md
+
+# The AWS/ECS build path — not used by Cloud Build
+.aws/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log

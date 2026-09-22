@@ -1,0 +1,82 @@
+﻿# ==============================================================================
+# Cloud Run production image — Enterprise Agentic RAG
+#
+# One image, two roles. The API service and the Streamlit UI service run the
+# same artifact; cloudrun/entrypoint.sh dispatches on $SERVICE_ROLE. This is the
+# same "one image, command differs" pattern the AWS plan uses for ECS, kept
+# intentionally so the two deployments stay conceptually identical.
+#
+# Build:  docker build -f Dockerfile.cloudrun -t enterprise-rag:local .
+# ==============================================================================
+
+# ---- Stage: wheelbuilder --------------------------------------------------
+# annoy has no prebuilt wheel for this platform, so it must be compiled from
+# source. Rather than ship a compiler in the runtime image, we compile it once
+# here (with g++) and copy only the resulting .whl into the lean final image.
+FROM python:3.11-slim-bookworm AS wheelbuilder
+RUN apt-get update && apt-get install -y --no-install-recommends g++ \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip wheel --no-cache-dir --wheel-dir /wheels annoy==1.17.3
+
+FROM python:3.11-slim-bookworm
+
+# uv from the official image — faster resolver, no pip bootstrap needed.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=wheelbuilder /wheels /wheels
+
+# Patch OS CVEs. No gcc/g++ here: the lean requirement set is wheels-only, so
+# the compiler toolchain that the AWS Dockerfile needs for torch is dead weight.
+RUN apt-get update && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LOGFIRE_IGNORE_NO_CONFIG=1 \
+    FASTEMBED_CACHE_PATH=/app/.cache/fastembed \
+    HF_HOME=/app/.cache/huggingface
+
+# ---- Layer 1: dependencies (cached until requirements-cloudrun.txt changes) ----
+# nemoguardrails 0.17.0 pins langchain<0.4.0, which conflicts with this
+# project's modern langchain==1.2.18, so it is installed separately with
+# --no-deps; its non-langchain extras are added after. See
+# app/guardrails/langchain_compat.py for the runtime shim this requires.
+COPY requirements-cloudrun.txt .
+RUN grep -v "^nemoguardrails" requirements-cloudrun.txt > /tmp/requirements-main.txt && \
+    uv pip install --system --no-cache -r /tmp/requirements-main.txt && \
+    uv pip install --system --no-cache --no-deps nemoguardrails==0.17.0 && \
+    uv pip install --system --no-cache lark nest-asyncio prompt-toolkit simpleeval typer && \
+    uv pip install --system --no-cache --find-links /wheels annoy==1.17.3
+
+# ---- Layer 2: pre-bake the guardrails embedding model -------------------------
+# NeMo Guardrails embeds its Colang canonical forms to match user intent. Without
+# this step the MiniLM model is downloaded on FIRST REQUEST of every cold start,
+# onto a container filesystem that is discarded when the instance scales to zero.
+# Baking it into the image converts a recurring ~15s network penalty into a
+# one-time build cost. This is the highest-leverage cold-start fix in the file.
+RUN mkdir -p "$FASTEMBED_CACHE_PATH" \
+    && python -c "\
+from fastembed import TextEmbedding; \
+m = TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2'); \
+list(m.embed(['warm the cache'])); \
+print('fastembed model baked into image')"
+
+# ---- Layer 3: application source (invalidates only on code changes) -----------
+COPY app/ ./app/
+COPY ui/ ./ui/
+COPY cloudrun/entrypoint.sh ./cloudrun/entrypoint.sh
+
+# Non-root runtime. The cache directories must be writable by appuser because
+# fastembed verifies the cache on load even when it is already populated.
+RUN chmod +x ./cloudrun/entrypoint.sh \
+    && useradd -m -u 1000 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# Documentation only. Cloud Run injects $PORT at runtime and the entrypoint
+# honours it; never hardcode a port in the CMD for Cloud Run.
+EXPOSE 8080
+
+ENV SERVICE_ROLE=api
+ENTRYPOINT ["./cloudrun/entrypoint.sh"]

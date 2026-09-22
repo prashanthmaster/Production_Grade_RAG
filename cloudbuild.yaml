@@ -1,0 +1,43 @@
+# ==============================================================================
+# Cloud Build — builds Dockerfile.cloudrun and pushes to Artifact Registry.
+#
+# `gcloud builds submit` defaults to a file literally named "Dockerfile", which
+# would build the AWS/ECS image (with torch). This config points it at the lean
+# Cloud Run Dockerfile instead. Build runs on Google's machines, so you do not
+# need Docker installed locally.
+# ==============================================================================
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - -f
+      - Dockerfile.cloudrun
+      - -t
+      - ${_IMAGE}:${SHORT_SHA}
+      - -t
+      - ${_IMAGE}:latest
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-sha
+    args: [push, "${_IMAGE}:${SHORT_SHA}"]
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-latest
+    args: [push, "${_IMAGE}:latest"]
+
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest
+
+options:
+  # E2_HIGHCPU_8 cuts the build from ~8 minutes to ~3. Still inside free tier
+  # for the handful of builds this project needs.
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1800s
+
+substitutions:
+  _IMAGE: placeholder-overridden-by-cli
