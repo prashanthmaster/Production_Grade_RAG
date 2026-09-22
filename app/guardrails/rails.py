@@ -1,9 +1,9 @@
-﻿import logfire
+import logfire
 from langchain_openai import ChatOpenAI
-from app.guardrails import langchain_compat  # noqa: F401 - must run before nemoguardrails import
 from nemoguardrails import LLMRails, RailsConfig
 
 from app.config import settings
+from app.guardrails import langchain_compat  # noqa: F401 - must run before nemoguardrails import
 from app.guardrails.colang_rules import COLANG_CONTENT, RAIL_INDICATORS, YAML_CONTENT
 
 _rails: LLMRails | None = None
@@ -51,4 +51,3 @@ def guard(message: str) -> tuple[bool, str | None]:
 
         logfire.info("âœ… Guardrails passed.")
         return False, None
-

@@ -39,7 +39,7 @@ def _check_neon_postgres() -> ConnectionResult:
     """Verify Neon Postgres is reachable and accepts queries."""
     import socket
     import time
-    from urllib.parse import urlsplit, parse_qs
+    from urllib.parse import parse_qs, urlsplit
 
     # --- Diagnostic step 1: raw TCP connect, bypassing psycopg entirely ---
     target_host = None
@@ -52,11 +52,9 @@ def _check_neon_postgres() -> ConnectionResult:
         target_host = hostaddr or parts.hostname
         target_port = parts.port or 5432
         t0 = time.monotonic()
-        with socket.create_connection((target_host, target_port), timeout=8) as s:
+        with socket.create_connection((target_host, target_port), timeout=8) as _:
             elapsed = time.monotonic() - t0
-            logfire.warning(
-                f"Postgres raw TCP connect OK to {target_host}:{target_port} in {elapsed:.2f}s"
-            )
+            logfire.warning(f"Postgres raw TCP connect OK to {target_host}:{target_port} in {elapsed:.2f}s")
     except Exception as e:
         elapsed = time.monotonic() - t0
         logfire.warning(
@@ -69,16 +67,14 @@ def _check_neon_postgres() -> ConnectionResult:
     # (TLS/SCRAM handshake) or specific to how ConnectionPool opens conns ---
     try:
         import psycopg
+
         t1 = time.monotonic()
-        with psycopg.connect(settings.postgres_uri, connect_timeout=8) as c:
+        with psycopg.connect(settings.postgres_uri, connect_timeout=8) as _:
             elapsed = time.monotonic() - t1
             logfire.warning(f"Postgres raw psycopg.connect() OK in {elapsed:.2f}s")
     except Exception as e:
         elapsed = time.monotonic() - t1
-        logfire.warning(
-            f"Postgres raw psycopg.connect() FAILED after {elapsed:.2f}s: "
-            f"{type(e).__name__}: {e}"
-        )
+        logfire.warning(f"Postgres raw psycopg.connect() FAILED after {elapsed:.2f}s: {type(e).__name__}: {e}")
 
     # --- Diagnostic step 2: normal psycopg pool path ---
     pool = None
