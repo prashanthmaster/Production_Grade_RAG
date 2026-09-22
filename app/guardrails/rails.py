@@ -1,9 +1,10 @@
+from app.guardrails import langchain_compat  # isort: skip  # noqa: F401,E402 - must run before nemoguardrails import
+
 import logfire
 from langchain_openai import ChatOpenAI
 from nemoguardrails import LLMRails, RailsConfig
 
 from app.config import settings
-from app.guardrails import langchain_compat  # noqa: F401 - must run before nemoguardrails import
 from app.guardrails.colang_rules import COLANG_CONTENT, RAIL_INDICATORS, YAML_CONTENT
 
 _rails: LLMRails | None = None
